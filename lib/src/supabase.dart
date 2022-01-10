@@ -5,9 +5,8 @@ import 'package:postgrest/postgrest.dart';
 import 'package:realtime_client/realtime_client.dart';
 import 'package:storage_client/storage_client.dart';
 import 'package:supabase/src/constants.dart';
+import 'package:supabase/src/supabase_query_builder.dart';
 import 'package:supabase/src/supabase_stream_builder.dart';
-
-import 'supabase_query_builder.dart';
 
 class SupabaseClient {
   final String supabaseUrl;
@@ -18,6 +17,8 @@ class SupabaseClient {
   final String authUrl;
   final String storageUrl;
   final Map<String, String> _headers;
+
+  String? changedAccessToken;
 
   late final GoTrueClient auth;
   late final RealtimeClient realtime;
@@ -39,6 +40,8 @@ class SupabaseClient {
       headers: headers,
     );
     realtime = _initRealtimeClient(headers: headers);
+
+    _listenForAuthEvents();
   }
 
   /// Supabase Storage allows you to manage user-generated content, such as photos or videos.
@@ -74,6 +77,13 @@ class SupabaseClient {
   PostgrestFilterBuilder rpc(String fn, {Map<String, dynamic>? params}) {
     final rest = _initPostgRESTClient();
     return rest.rpc(fn, params: params);
+  }
+
+  /// Remove all active subscriptions.
+  void removeAllSubscriptions() {
+    for (final sub in realtime.channels) {
+      removeSubscription(sub);
+    }
   }
 
   /// Removes an active subscription and returns the number of open connections.
@@ -149,5 +159,35 @@ class SupabaseClient {
       completer.complete(true);
     }).receive('error', (e) => {completer.complete(false)});
     return completer.future;
+  }
+
+  Subscription? _listenForAuthEvents() {
+    final data = auth.onAuthStateChange((event, session) {
+      _handleTokenChanged(event, session?.accessToken, 'CLIENT');
+    }).data;
+    return data;
+  }
+
+  void _handleTokenChanged(
+    AuthChangeEvent event,
+    String? token,
+    String source,
+  ) {
+    if ((event == AuthChangeEvent.tokenRefreshed ||
+            event == AuthChangeEvent.signedIn) &&
+        changedAccessToken != token) {
+      // Token has changed
+      realtime.setAuth(token);
+      // Ideally we should call this.auth.recoverSession() - need to make public
+      // to trigger a "SIGNED_IN" event on this client.
+      if (source == 'STORAGE') auth.setAuth(token!);
+
+      changedAccessToken = token;
+    } else if (event == AuthChangeEvent.signedOut ||
+        event == AuthChangeEvent.userDeleted) {
+      // Token is removed
+      removeAllSubscriptions();
+      if (source == 'STORAGE') auth.signOut();
+    }
   }
 }
